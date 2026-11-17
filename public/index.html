@@ -81,18 +81,23 @@
   /* ---------- 日報圖片 ---------- */
   .report {
     border: 0; padding: 0; border-radius: 1rem; background: var(--surface); color: var(--ink);
-    width: min(34rem, calc(100vw - 2rem)); max-height: calc(100dvh - 2rem);
+    width: min(28rem, calc(100vw - 2rem)); max-height: calc(100dvh - 2rem);
     box-shadow: 0 1.2rem 4rem rgb(0 0 0 / 0.3);
   }
   .report::backdrop { background: rgb(10 12 16 / 0.55); }
-  .report-in { padding: 1rem 1.1rem 1.1rem; display: grid; gap: 0.8rem; }
+  .report-in {
+    padding: 1rem 1.1rem 1.1rem; display: flex; flex-direction: column; gap: 0.8rem;
+    max-height: calc(100dvh - 2rem);
+  }
   .report-foot { display: flex; align-items: center; justify-content: flex-end; gap: 0.6rem 1rem; flex-wrap: wrap; }
   .report-head { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
   .report-head h2 { margin: 0; font-size: 1.05rem; font-weight: 400; }
-  .report img {
-    display: block; margin: 0 auto; max-width: 100%; max-height: calc(100dvh - 12.5rem); width: auto; height: auto;
-    border-radius: 0.6rem; border: 1px solid var(--line); background: #fff;
+  /* 發票很長：用看得清楚的寬度顯示，往下捲著看 */
+  .report-view {
+    flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+    border-radius: 0.6rem; border: 1px solid var(--line);
   }
+  .report img { display: block; width: 100%; height: auto; }
   .report-note { margin: 0; flex: 1 1 12rem; font-size: 0.9rem; color: var(--ink-2); }
   .report-actions { display: flex; gap: 0.6rem; }
 
@@ -205,7 +210,7 @@
     <div class="top-right">
       <span class="status" id="status" hidden></span>
       <span class="updated" id="updated">讀取中…</span>
-      <button type="button" class="btn" id="copy" hidden title="把這天的日報做成一張圖，可以複製或下載">日報圖片</button>
+      <button type="button" class="btn" id="copy" hidden title="把這天的日報做成一張發票樣式的圖，可以複製或下載">日報圖片</button>
     </div>
   </header>
 
@@ -230,7 +235,7 @@
       <h2 id="report-title">日報</h2>
       <button type="button" class="btn" id="report-close">關閉</button>
     </div>
-    <img id="report-img" alt="">
+    <div class="report-view"><img id="report-img" alt=""></div>
     <div class="report-foot">
       <p class="report-note" id="report-note"></p>
       <div class="report-actions">
@@ -384,198 +389,575 @@
     return lead + items.map(([k, v]) => `${k} <b>${v}</b>`).join('<span class="sep">·</span>');
   }
 
-  // ---------- 日報圖片：用 canvas 畫一張卡片 ----------
-  // 圖片固定用淺色，貼到哪裡都好讀；顏色跟網頁的淺色主題一致
-  const CARD = {
-    bg: '#ffffff', tile: '#f2f3f6', track: '#eceef1', line: '#e3e6ea',
-    ink: '#15171c', ink2: '#4b505a', muted: '#767b85',
-    claude: '#eb6834', codex: '#2a78d6', other: '#1baf7a',
-  };
-  const CARD_TEXT = 'Huninn, "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif';
-  const CARD_NUM = '"Barlow Condensed", Huninn, sans-serif';
-  const CARD_W = 600; // 邏輯寬度；輸出 2 倍 = 1200px
+  // ---------- 日報圖片：畫成一張電子發票（證明聯＋交易明細） ----------
+  // 仿 58mm 熱感紙：列印寬度 384 點，一般字一格 12×24 點、中文佔兩格，一行 32 格。
+  // 熱感紙印不出彩色，所以整張只有黑色；圖片固定用淺色，貼到哪裡都好讀
+  const RC = { desk: '#e3e6eb', paper: '#fdfdfb', ink: '#1b1b1b', shadow: 'rgb(20 26 36 / 0.18)' };
+  const R_MONO = '"IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace';
+  const R_HAN = '"Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif';
+  const R_FONTS = 'https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;700&family=Noto+Sans+TC:wght@400;700;900&display=swap';
+  const R_CELL = 12, R_PRINT = 32 * R_CELL; // 一格 12 點，32 格 = 384 點
+  const R_SIDE = 28, R_DESK = 24, R_TOOTH = 10; // 紙的左右留白、紙外的桌面、鋸齒
+  const CARD_W = R_PRINT + 2 * (R_SIDE + R_DESK); // 邏輯寬度 488；輸出 2 倍
   const CARD_SCALE = 2;
+  const REPO_URL = 'https://github.com/Zhuyuan0907/today-use-token';
 
-  // 畫整張卡片，回傳高度。texts 會收集畫過的字，用來先把字型載好
-  function drawReport(ctx, day, texts = []) {
-    const W = CARD_W, P = 36, inner = W - 2 * P;
-    const text = (str, x, y, o = {}) => {
-      str = String(str);
-      texts.push(str);
-      let size = o.size || 16;
-      const font = (sz) => `${o.num ? 600 : 400} ${sz}px ${o.num ? CARD_NUM : CARD_TEXT}`;
-      ctx.font = font(size);
-      if (o.max && ctx.measureText(str).width > o.max) {
-        size = (size * o.max) / ctx.measureText(str).width;
-        ctx.font = font(size);
-      }
-      ctx.fillStyle = o.color || CARD.ink;
-      ctx.textAlign = o.align || 'left';
-      ctx.textBaseline = 'alphabetic';
-      ctx.fillText(str, x, y);
-      return ctx.measureText(str).width;
-    };
-    const box = (x, y, w, h, r, color) => {
-      ctx.fillStyle = color;
-      ctx.beginPath();
-      ctx.roundRect(x, y, w, h, r);
-      ctx.fill();
-    };
-    const hline = (y) => { ctx.fillStyle = CARD.line; ctx.fillRect(P, y, inner, 1); };
-    const dot = (x, y, color) => { ctx.fillStyle = color; ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill(); };
-    // ▲▼ 字型裡的太大太粗，自己畫一個小的；y 是文字基線
-    const arrow = (x, y, up) => {
-      ctx.fillStyle = CARD.ink;
-      ctx.beginPath();
-      if (up) { ctx.moveTo(x, y - 2); ctx.lineTo(x + 12, y - 2); ctx.lineTo(x + 6, y - 13); }
-      else { ctx.moveTo(x, y - 13); ctx.lineTo(x + 12, y - 13); ctx.lineTo(x + 6, y - 2); }
-      ctx.closePath();
-      ctx.fill();
-    };
-
-    const isToday = day.date === data.today;
-    const st = stats(day);
-    const parts = usedAgents(day).map((a) => ({ ...a, color: CARD[a.key], v: day.agents[a.key].totalTokens }));
-
-    ctx.fillStyle = CARD.bg;
-    ctx.fillRect(0, 0, W, 5000);
-
-    // 頁首：標題、日期
-    let y = P + 12;
-    text('今天蹬了多少 Token · 日報', P, y, { size: 14, color: CARD.muted });
-    if (isToday) {
-      const t = new Date(data.generatedAt).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false });
-      text(`今天到 ${t} 為止`, W - P, y, { size: 14, color: CARD.muted, align: 'right' });
+  // 中文、全形標點佔兩格
+  const isWide = (ch) => /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/.test(ch);
+  const colsOf = (s) => [...s].reduce((n, ch) => n + (isWide(ch) ? 2 : 1), 0);
+  function clip(s, max) {
+    if (colsOf(s) <= max) return s;
+    let out = '';
+    for (const ch of s) {
+      if (colsOf(out + ch) > max - 1) break;
+      out += ch;
     }
-    const [yy, mm, dd] = day.date.split('-');
-    y += 38;
-    text(`${yy} 年 ${+mm} 月 ${+dd} 日 ${weekday(day.date)}`, P, y, { size: 26 });
+    return out + '…';
+  }
+  const tokensShort = (n) => zhParts(n).join(''); // 8.39億、86.6萬、1,234
 
-    // 總量：撐滿寬度，最多 120px
-    const big = fmt(day.totalTokens);
-    ctx.font = `600 100px ${CARD_NUM}`;
-    const size = Math.min(120, (100 * inner) / (ctx.measureText(big).width || 1));
-    y += 24 + size * 0.72;
-    text(big, P, y, { size, num: true });
-    y += 40;
-    const [short, unit] = zhParts(day.totalTokens);
-    text(unit ? `約 ${short} ${unit} tokens` : `${short} tokens`, P, y, { size: 18, color: CARD.ink2 });
-
-    // 各工具比例：細條 + 圖例
-    y += 22;
-    if (parts.length) {
-      const gap = 2, avail = inner - gap * (parts.length - 1);
-      let x = P;
-      for (const p of parts) {
-        const w = Math.max(2, (p.v / day.totalTokens) * avail);
-        box(x, y, w, 10, 5, p.color);
-        x += w + gap;
-      }
-    } else {
-      box(P, y, inner, 10, 5, CARD.track);
+  // 發票的期別：民國年＋兩個月一期，例如 115年11-12月；條碼裡寫成 11512
+  function invoicePeriod(ymd) {
+    const [y, m] = ymd.split('-').map(Number);
+    const roc = y - 1911, end = m + (m % 2), mm = (n) => String(n).padStart(2, '0');
+    return { text: `${roc}年${mm(end - 1)}-${mm(end)}月`, code: `${roc}${mm(end)}` };
+  }
+  // 開立時間：今天是資料更新的時間，過去的日子就是那天最後一秒
+  function issuedAt(day) {
+    if (day.date !== data.today) return `${day.date} 23:59:59`;
+    try {
+      return new Date(data.generatedAt).toLocaleString('sv-SE', { timeZone: data.timezone, hour12: false });
+    } catch {
+      return day.date;
     }
-    y += 34;
-    if (!parts.length) text('這天沒有用量', P, y, { size: 14, color: CARD.muted });
-    let lx = P;
-    for (const p of parts) {
-      dot(lx + 5, y - 5, p.color);
-      lx += 16 + text(`${p.name} ${pct(p.v, day.totalTokens)}`, lx + 16, y, { size: 14, color: CARD.ink2 }) + 22;
+  }
+  const kwhText = (n) => `${fmt(n, n < 1 ? 2 : n < 100 ? 1 : 0)} 度`;
+  const billText = (n) => `${data.electricity?.currency ?? ''}${fmt(n, n < 10 ? 1 : 0)}`;
+
+  // 左邊 QR Code 掃出來是這天的摘要
+  function reportSummary(day) {
+    const lines = [`${day.date} ${weekday(day.date)} 蹬了 ${fmt(day.totalTokens)} tokens`, `API 等值 ${usd(day.totalCost)}`];
+    if (data.electricity && day.energyKwh) {
+      lines.push(`耗電約 ${kwhText(day.energyKwh.mid)}，電費約 ${billText(day.electricityCost.mid)}`);
     }
-
-    // 六格：花費、耗電、電費／跟前一天、前 N 天平均比、排名
-    y += 22;
-    const gapT = 10, tw = (inner - 2 * gapT) / 3, th = 72;
-    const e = data.electricity;
-    const kwh = day.energyKwh?.mid ?? 0, money = day.electricityCost?.mid ?? 0;
-    const tiles = [
-      ['API 等值', usd(day.totalCost), true],
-      ['耗電約', `${fmt(kwh, kwh < 1 ? 2 : kwh < 100 ? 1 : 0)} 度`, true],
-      ['電費約', `${e?.currency ?? ''}${fmt(money, money < 10 ? 1 : 0)}`, true],
-      [isToday ? '比昨天全天' : '比前一天', delta(day.totalTokens, st.prev?.totalTokens) || '—', false],
-      [`比前 ${st.avgDays} 天平均`, (st.avgDays && delta(day.totalTokens, st.avg)) || '—', false],
-      [`最近 ${st.window} 天排名`, st.rank ? `第 ${st.rank} 高` : '—', false],
-    ];
-    tiles.forEach(([label, value, num], i) => {
-      const x = P + (i % 3) * (tw + gapT), ty = y + Math.floor(i / 3) * (th + gapT);
-      box(x, ty, tw, th, 12, CARD.tile);
-      text(label, x + 14, ty + 25, { size: 13, color: CARD.muted, max: tw - 28 });
-      const m = /^([▲▼]) (.+)$/.exec(value);
-      if (m) {
-        arrow(x + 14, ty + 57, m[1] === '▲');
-        text(m[2], x + 33, ty + 57, { size: 20, max: tw - 47 });
-      } else {
-        text(value, x + 14, ty + 57, num ? { size: 30, num: true, max: tw - 28 } : { size: 20, max: tw - 28 });
-      }
-    });
-    y += th * 2 + gapT;
-
-    // 這天以前的 14 天：這天是最後一根，其他淡一點
-    const idx = data.days.findIndex((d) => d.date === day.date);
-    const span = data.days.slice(Math.max(0, idx - 13), idx + 1);
-    y += 40;
-    text(isToday ? `最近 ${span.length} 天` : `到 ${md(day.date)} 為止的 ${span.length} 天`, P, y, { size: 15, color: CARD.ink2 });
-    text(`${isToday ? '今天' : md(day.date)} ${day.totalTokens ? zh(day.totalTokens) : '0'}`, W - P, y, { size: 15, align: 'right' });
-    const chartH = 100, base = y + 30 + chartH;
-    const slot = inner / span.length, bw = Math.min(26, slot * 0.64);
-    const max = Math.max(1, ...span.map((d) => d.totalTokens));
-    const cx = (k) => P + k * slot + slot / 2;
-    hline(base);
-    span.forEach((d, k) => {
-      const x = cx(k) - bw / 2;
-      const sel = d.date === day.date;
-      const segs = AGENTS.map((a) => ({ c: CARD[a.key], v: d.agents[a.key].totalTokens })).filter((q) => q.v > 0);
-      let top = base;
-      ctx.globalAlpha = sel ? 1 : 0.35;
-      segs.forEach((q, j) => {
-        const h = Math.max(1.5, (q.v / max) * chartH);
-        ctx.fillStyle = q.c;
-        ctx.beginPath();
-        ctx.roundRect(x, top - h, bw, h, j === segs.length - 1 ? [3, 3, 0, 0] : 0);
-        ctx.fill();
-        top -= h + 2; // 堆疊之間留 2px
-      });
-      ctx.globalAlpha = 1;
-    });
-    const last = span.length - 1;
-    text(isToday ? '今天' : md(day.date), cx(last), base + 20, { size: 12, color: CARD.ink, align: 'center' });
-    if (last >= 4) text(md(span[0].date), cx(0), base + 20, { size: 12, color: CARD.muted, align: 'center' });
-    y = base + 20;
-
-    // 各工具：總量、花費、前三個模型
-    for (const p of parts) {
-      const a = day.agents[p.key];
-      y += 44;
-      hline(y - 28);
-      dot(P + 5, y - 6, p.color);
-      const title = p.key === 'other' && a.sources.length ? `${p.name}（${a.sources.join('、')}）` : p.name;
-      text(title, P + 18, y, { size: 18, max: 230 });
-      text(`${zh(a.totalTokens)} tokens · ${usd(a.totalCost)}`, W - P, y, { size: 15, color: CARD.ink2, align: 'right' });
-      const bx = P + 190, bwid = inner - 190 - 124;
-      for (const m of a.models.slice(0, 3)) {
-        y += 28;
-        text(prettyModel(m.name), P + 18, y, { size: 14, color: CARD.ink2, max: 160 });
-        box(bx, y - 8, bwid, 6, 3, CARD.track);
-        box(bx, y - 8, Math.max(3, (bwid * m.tokens) / (a.totalTokens || 1)), 6, 3, p.color);
-        text(zh(m.tokens), W - P - 54, y, { size: 14, align: 'right' });
-        text(pct(m.tokens, a.totalTokens), W - P, y, { size: 13, color: CARD.muted, align: 'right' });
-      }
-    }
-
-    // 頁尾
-    y += 46;
-    hline(y - 24);
-    text('數據來自 ccusage · github.com/Zhuyuan0907/today-use-token', P, y, { size: 12, color: CARD.muted });
-    return y + P - 14;
+    const tools = usedAgents(day).map((a) => `${a.name} ${pct(day.agents[a.key].totalTokens, day.totalTokens)}`);
+    if (tools.length) lines.push(tools.join('、'));
+    return lines.join('\n');
   }
 
-  // 等字型載好（最多 3 秒），不然 canvas 會先用系統字型畫
+  // ---------- Code 39 條碼：發票上那條（期別＋字軌號碼＋隨機碼） ----------
+  const C39 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-. *$/+%';
+  const C39_BARS = ('000110100 100100001 001100001 101100000 000110001 100110000 001110000 000100101 100100100 001100100 ' +
+    '100001001 001001001 101001000 000011001 100011000 001011000 000001101 100001100 001001100 000011100 ' +
+    '100000011 001000011 101000010 000010011 100010010 001010010 000000111 100000110 001000110 000010110 ' +
+    '110000001 011000001 111000000 010010001 110010000 011010000 010000101 110000100 011000100 010010100 ' +
+    '010101000 010100010 010001010 000101010').split(' ');
+  // 九個元素（條、空交錯）裡有三個寬的；回傳總寬度，ctx 是 null 時只量
+  function code39(ctx, text, x, y, h, narrow = 1, wide = 2.5) {
+    let cx = x;
+    for (const ch of `*${text}*`) {
+      const bars = C39_BARS[C39.indexOf(ch)];
+      for (let k = 0; k < 9; k++) {
+        const w = bars[k] === '1' ? wide : narrow;
+        if (ctx && k % 2 === 0) ctx.fillRect(cx, y, w, h);
+        cx += w;
+      }
+      cx += narrow;
+    }
+    return cx - narrow - x;
+  }
+
+  // ---------- QR Code（位元組模式、版本 1–20、糾錯 M 或 L） ----------
+  // 演算法照 Project Nayuki 的 QR Code generator（MIT）。回傳 true＝黑 的方陣，放不下回傳 null
+  const QR_ECC = { // 每個版本：[每塊的糾錯碼數, 塊數]
+    M: [[10, 1], [16, 1], [26, 1], [18, 2], [24, 2], [16, 4], [18, 4], [22, 4], [22, 5], [26, 5],
+      [30, 5], [22, 8], [22, 9], [24, 9], [24, 10], [28, 10], [28, 11], [26, 13], [26, 14], [26, 16]],
+    L: [[7, 1], [10, 1], [15, 1], [20, 1], [26, 1], [18, 2], [20, 2], [24, 2], [30, 2], [18, 4],
+      [20, 4], [24, 4], [26, 4], [30, 4], [22, 6], [24, 6], [28, 6], [30, 6], [28, 7], [28, 8]],
+  };
+  const qrRawModules = (v) => {
+    let r = (16 * v + 128) * v + 64;
+    if (v >= 2) {
+      const n = Math.floor(v / 7) + 2;
+      r -= (25 * n - 10) * n - 55;
+      if (v >= 7) r -= 36;
+    }
+    return r;
+  };
+  // 放得下 text 的最小版本與糾錯等級（同一版本先用 M）
+  function qrFit(text, minVersion = 1) {
+    const len = new TextEncoder().encode(text).length;
+    for (let v = minVersion; v <= 20; v++) {
+      for (const ecl of ['M', 'L']) {
+        const [per, blocks] = QR_ECC[ecl][v - 1];
+        if (4 + (v < 10 ? 8 : 16) + len * 8 <= (Math.floor(qrRawModules(v) / 8) - per * blocks) * 8) return { v, ecl };
+      }
+    }
+    return null;
+  }
+  function qrCode(text, minVersion = 1) {
+    const fit = qrFit(text, minVersion);
+    if (!fit) return null;
+    const { v: ver, ecl } = fit;
+    const [per, nBlocks] = QR_ECC[ecl][ver - 1];
+    const size = ver * 4 + 17;
+    const rawCw = Math.floor(qrRawModules(ver) / 8), dataCw = rawCw - per * nBlocks;
+
+    // 資料位元：模式 0100、長度、內容、結尾、補齊
+    const bits = [];
+    const put = (val, len) => { for (let i = len - 1; i >= 0; i--) bits.push((val >>> i) & 1); };
+    const bytes = new TextEncoder().encode(text);
+    put(4, 4);
+    put(bytes.length, ver < 10 ? 8 : 16);
+    bytes.forEach((b) => put(b, 8));
+    put(0, Math.min(4, dataCw * 8 - bits.length));
+    put(0, (8 - (bits.length % 8)) % 8);
+    for (let pad = 0xec; bits.length < dataCw * 8; pad ^= 0xec ^ 0x11) put(pad, 8);
+    const data = [];
+    for (let i = 0; i < bits.length; i += 8) data.push(bits.slice(i, i + 8).reduce((a, b) => (a << 1) | b, 0));
+
+    // Reed–Solomon 糾錯碼，分塊後交錯
+    const mul = (x, y) => {
+      let z = 0;
+      for (let i = 7; i >= 0; i--) {
+        z = (z << 1) ^ ((z >>> 7) * 0x11d);
+        z ^= ((y >>> i) & 1) * x;
+      }
+      return z;
+    };
+    const div = new Array(per).fill(0);
+    div[per - 1] = 1;
+    for (let i = 0, root = 1; i < per; i++, root = mul(root, 2)) {
+      for (let j = 0; j < per; j++) {
+        div[j] = mul(div[j], root);
+        if (j + 1 < per) div[j] ^= div[j + 1];
+      }
+    }
+    const ecc = (dat) => {
+      const r = new Array(per).fill(0);
+      for (const b of dat) {
+        const f = b ^ r.shift();
+        r.push(0);
+        div.forEach((c, i) => { r[i] ^= mul(c, f); });
+      }
+      return r;
+    };
+    const nShort = nBlocks - (rawCw % nBlocks), shortLen = Math.floor(rawCw / nBlocks);
+    const blocks = [];
+    for (let i = 0, k = 0; i < nBlocks; i++) {
+      const dat = data.slice(k, (k += shortLen - per + (i < nShort ? 0 : 1)));
+      const e = ecc(dat);
+      if (i < nShort) dat.push(0);
+      blocks.push(dat.concat(e));
+    }
+    const cw = [];
+    for (let i = 0; i < blocks[0].length; i++) {
+      blocks.forEach((b, j) => { if (i !== shortLen - per || j >= nShort) cw.push(b[i]); });
+    }
+
+    // 固定圖形：定位、時序、對齊、格式、版本
+    const mod = Array.from({ length: size }, () => new Array(size).fill(false));
+    const fn = Array.from({ length: size }, () => new Array(size).fill(false));
+    const set = (x, y, dark) => { mod[y][x] = dark; fn[y][x] = true; };
+    for (let i = 0; i < size; i++) {
+      set(6, i, i % 2 === 0);
+      set(i, 6, i % 2 === 0);
+    }
+    for (const [cx, cy] of [[3, 3], [size - 4, 3], [3, size - 4]]) {
+      for (let dy = -4; dy <= 4; dy++) {
+        for (let dx = -4; dx <= 4; dx++) {
+          const x = cx + dx, y = cy + dy, d = Math.max(Math.abs(dx), Math.abs(dy));
+          if (x >= 0 && x < size && y >= 0 && y < size) set(x, y, d !== 2 && d !== 4);
+        }
+      }
+    }
+    if (ver > 1) {
+      const n = Math.floor(ver / 7) + 2, step = Math.floor((ver * 8 + n * 3 + 5) / (n * 4 - 4)) * 2;
+      const pos = [6];
+      for (let p = size - 7; pos.length < n; p -= step) pos.splice(1, 0, p);
+      pos.forEach((ax, i) => pos.forEach((ay, j) => {
+        if ((i === 0 && j === 0) || (i === 0 && j === n - 1) || (i === n - 1 && j === 0)) return;
+        for (let dy = -2; dy <= 2; dy++) {
+          for (let dx = -2; dx <= 2; dx++) set(ax + dx, ay + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
+        }
+      }));
+    }
+    const drawFormat = (mask) => {
+      const d = ((ecl === 'L' ? 1 : 0) << 3) | mask;
+      let r = d;
+      for (let i = 0; i < 10; i++) r = (r << 1) ^ ((r >>> 9) * 0x537);
+      const b = ((d << 10) | r) ^ 0x5412, bit = (i) => ((b >>> i) & 1) === 1;
+      for (let i = 0; i <= 5; i++) set(8, i, bit(i));
+      set(8, 7, bit(6));
+      set(8, 8, bit(7));
+      set(7, 8, bit(8));
+      for (let i = 9; i < 15; i++) set(14 - i, 8, bit(i));
+      for (let i = 0; i < 8; i++) set(size - 1 - i, 8, bit(i));
+      for (let i = 8; i < 15; i++) set(8, size - 15 + i, bit(i));
+      set(8, size - 8, true);
+    };
+    drawFormat(0);
+    if (ver >= 7) {
+      let r = ver;
+      for (let i = 0; i < 12; i++) r = (r << 1) ^ ((r >>> 11) * 0x1f25);
+      const b = (ver << 12) | r;
+      for (let i = 0; i < 18; i++) {
+        const dark = ((b >>> i) & 1) === 1, a = size - 11 + (i % 3), c = Math.floor(i / 3);
+        set(a, c, dark);
+        set(c, a, dark);
+      }
+    }
+
+    // 資料：從右下角開始，兩欄一組上下來回
+    let i = 0;
+    for (let right = size - 1; right >= 1; right -= 2) {
+      if (right === 6) right = 5;
+      for (let vert = 0; vert < size; vert++) {
+        for (let j = 0; j < 2; j++) {
+          const x = right - j, y = ((right + 1) & 2) === 0 ? size - 1 - vert : vert;
+          if (!fn[y][x] && i < cw.length * 8) {
+            mod[y][x] = ((cw[i >>> 3] >>> (7 - (i & 7))) & 1) === 1;
+            i++;
+          }
+        }
+      }
+    }
+
+    // 八種遮罩挑扣分最少的
+    const MASKS = [
+      (x, y) => (x + y) % 2 === 0,
+      (x, y) => y % 2 === 0,
+      (x, y) => x % 3 === 0,
+      (x, y) => (x + y) % 3 === 0,
+      (x, y) => (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0,
+      (x, y) => ((x * y) % 2) + ((x * y) % 3) === 0,
+      (x, y) => (((x * y) % 2) + ((x * y) % 3)) % 2 === 0,
+      (x, y) => (((x + y) % 2) + ((x * y) % 3)) % 2 === 0,
+    ];
+    const applyMask = (m) => {
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) if (!fn[y][x] && MASKS[m](x, y)) mod[y][x] = !mod[y][x];
+      }
+    };
+    const penalty = () => {
+      let p = 0, dark = 0;
+      for (let a = 0; a < size; a++) {
+        let runH = 1, runV = 1;
+        for (let b = 0; b < size; b++) {
+          if (mod[a][b]) dark++;
+          if (a < size - 1 && b < size - 1 && mod[a][b] === mod[a][b + 1] && mod[a][b] === mod[a + 1][b] && mod[a][b] === mod[a + 1][b + 1]) p += 3;
+          if (b > 0) {
+            if (mod[a][b] === mod[a][b - 1]) runH++; else { if (runH >= 5) p += runH - 2; runH = 1; }
+            if (mod[b][a] === mod[b - 1][a]) runV++; else { if (runV >= 5) p += runV - 2; runV = 1; }
+          }
+        }
+        if (runH >= 5) p += runH - 2;
+        if (runV >= 5) p += runV - 2;
+      }
+      return p + Math.floor(Math.abs(dark * 20 - size * size * 10) / (size * size)) * 10;
+    };
+    let best = 0, bestScore = Infinity;
+    for (let m = 0; m < 8; m++) {
+      applyMask(m);
+      drawFormat(m);
+      const s = penalty();
+      if (s < bestScore) { bestScore = s; best = m; }
+      applyMask(m);
+    }
+    applyMask(best);
+    drawFormat(best);
+    return mod;
+  }
+
+  // ---------- 整張發票 ----------
+  // 先排版、把要畫的東西記下來，量完紙有多長再一起畫；回傳圖片高度。texts 收集畫過的字，用來先載好字型
+  function drawReport(ctx, day, texts = []) {
+    const ops = [];
+    const draw = (f) => ops.push(f);
+    const L = R_DESK + R_SIDE; // 列印區的左邊
+    const px = (n) => Math.round(n * CARD_SCALE) / CARD_SCALE; // 對齊實際像素，條碼和 QR Code 才不會糊
+    const isToday = day.date === data.today;
+    const st = stats(day);
+    const parts = usedAgents(day);
+    const period = invoicePeriod(day.date);
+    const track = `TK${day.date.replaceAll('-', '')}`; // 字軌 TK（token）＋日期
+    const rand = String(day.totalTokens % 10000).padStart(4, '0');
+
+    // 在格子上印字：x 是列印區裡的位置（align 決定是開頭、結尾還是中間）
+    // small：小字（一格 9 點）；scale 2：倍寬倍高的放大字
+    const print = (str, x, y, o = {}) => {
+      str = String(str);
+      texts.push(str);
+      const s = o.scale || 1, cell = (o.small ? 9 : R_CELL) * s, w = colsOf(str) * cell;
+      let cx = L + (o.align === 'right' ? x - w : o.align === 'center' ? x - w / 2 : x);
+      for (const ch of str) {
+        const han = isWide(ch), cw = (han ? 2 : 1) * cell, mid = cx + cw / 2;
+        if (ch === '▲' || ch === '▼') {
+          const up = ch === '▲', h = 10 * s, hw = 5.5 * s;
+          draw(() => {
+            ctx.fillStyle = RC.ink;
+            ctx.beginPath();
+            ctx.moveTo(mid - hw, up ? y - 1 : y - 1 - h);
+            ctx.lineTo(mid + hw, up ? y - 1 : y - 1 - h);
+            ctx.lineTo(mid, up ? y - 1 - h : y - 1);
+            ctx.closePath();
+            ctx.fill();
+          });
+        } else if (ch !== ' ') {
+          const size = (o.small ? 15 : 20) * s * (han ? 1.15 : 1); // 中文跟熱感印表機一樣幾乎塞滿兩格
+          const font = han ? `${o.bold ? 700 : 400} ${size}px ${R_HAN}` : `${o.bold ? 700 : 500} ${size}px ${R_MONO}`;
+          draw(() => {
+            ctx.font = font;
+            ctx.fillStyle = RC.ink;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'alphabetic';
+            ctx.fillText(ch, mid, y);
+          });
+        }
+        cx += cw;
+      }
+      return w;
+    };
+    // 左邊一段、右邊一段
+    const row = (y, left, right, o = {}) => {
+      if (left) print(left, 0, y, o);
+      if (right) print(right, R_PRINT, y, { ...o, align: 'right' });
+    };
+    const dashes = (y) => print('-'.repeat(32), 0, y);
+    // 證明聯上面的大字：置中，太寬就壓窄
+    const headline = (str, y, font, maxW = R_PRINT) => {
+      texts.push(str);
+      draw(() => {
+        ctx.font = font;
+        ctx.fillStyle = RC.ink;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'alphabetic';
+        const w = ctx.measureText(str).width;
+        ctx.save();
+        ctx.translate(L + R_PRINT / 2, y);
+        if (w > maxW) ctx.scale(maxW / w, 1);
+        ctx.fillText(str, 0, 0);
+        ctx.restore();
+      });
+    };
+
+    // ===== 第一張：電子發票證明聯 =====
+    const proofTop = R_DESK;
+    let y = proofTop + R_TOOTH + 40;
+    headline('今天蹬了多少 Token', y, `700 24px ${R_HAN}`);
+    y += 50;
+    headline('電子蹬票證明聯', y, `900 38px ${R_HAN}`, 300);
+    y += 54;
+    headline(period.text, y, `900 44px ${R_HAN}`, 330);
+    y += 52;
+    headline(`${track.slice(0, 2)}-${track.slice(2)}`, y, `900 44px ${R_HAN}`, 330);
+    y += 38;
+    row(y, issuedAt(day));
+    y += 30;
+    row(y, `隨機碼 ${rand}`, `總計 ${usd(day.totalCost)}`);
+    y += 30;
+    row(y, `賣方 ${clip(parts.map((a) => a.name).join('、') || '—', 27)}`);
+
+    // 條碼（期別＋字軌號碼＋隨機碼，共 19 碼），置中
+    y += 16;
+    const code = `${period.code}${track}${rand}`;
+    const bw = code39(null, code, 0, 0, 0);
+    const bx = px(L + (R_PRINT - bw) / 2), by = px(y);
+    draw(() => { ctx.fillStyle = RC.ink; code39(ctx, code, bx, by, 40); });
+    y += 40 + 16;
+
+    // 兩個 QR Code：左邊是這天的摘要，右邊是專案網址；用同一個版本，看起來一樣密
+    const summary = reportSummary(day);
+    const ver = Math.max(qrFit(summary)?.v ?? 1, qrFit(REPO_URL)?.v ?? 1);
+    const qrs = [qrCode(summary, ver), qrCode(REPO_URL, ver)];
+    const qrBox = 150, qrGap = (R_PRINT - 2 * qrBox) / 3;
+    qrs.forEach((m, k) => {
+      if (!m) return;
+      const unit = Math.floor((qrBox / m.length) * CARD_SCALE) / CARD_SCALE;
+      const side = unit * m.length;
+      const qx = px(L + qrGap + k * (qrBox + qrGap) + (qrBox - side) / 2), qy = px(y + (qrBox - side) / 2);
+      draw(() => {
+        ctx.fillStyle = RC.ink;
+        m.forEach((line, r) => line.forEach((dark, c) => { if (dark) ctx.fillRect(qx + c * unit, qy + r * unit, unit, unit); }));
+      });
+    });
+    y += qrBox + 24;
+    const proofBottom = y;
+
+    // ===== 第二張：交易明細 =====
+    const detailTop = proofBottom + 14;
+    y = detailTop + 40;
+    print('交易明細', R_PRINT / 2, y, { align: 'center', bold: true });
+    y += 34;
+    const until = isToday ? `到 ${issuedAt(day).slice(11, 16)} 為止` : '全天';
+    row(y, `${day.date} ${weekday(day.date)}`, until);
+    y += 26;
+    dashes(y);
+    y += 30;
+    const COL_QTY = 22 * R_CELL; // 數量欄的結尾
+    print('品名', 0, y);
+    print('數量', COL_QTY, y, { align: 'right' });
+    print('金額', R_PRINT, y, { align: 'right' });
+    if (!parts.length) {
+      y += 30;
+      print('這天沒有用量', 0, y);
+    }
+    for (const a of parts) {
+      const s = day.agents[a.key];
+      y += 34;
+      const title = a.key === 'other' && s.sources.length ? `${a.name}（${s.sources.join('、')}）` : a.name;
+      print(clip(title, 26), 0, y, { bold: true });
+      print(pct(s.totalTokens, day.totalTokens), R_PRINT, y, { align: 'right', bold: true });
+      const shown = s.models.slice(0, 3);
+      const rest = s.models.slice(3);
+      const lines = shown.map((m) => [prettyModel(m.name).replace(/^Claude /, ''), m.tokens, m.cost]);
+      if (rest.length) {
+        lines.push([`其他 ${rest.length} 個`, rest.reduce((n, m) => n + m.tokens, 0), rest.reduce((n, m) => n + (m.cost || 0), 0)]);
+      }
+      for (const [name, tokens, cost] of lines) {
+        y += 28;
+        const qty = tokensShort(tokens), amount = usd(cost || 0).replace('US', '');
+        print(clip(name, 22 - colsOf(qty) - 2), R_CELL, y);
+        print(qty, COL_QTY, y, { align: 'right' });
+        print(amount, R_PRINT, y, { align: 'right' });
+      }
+    }
+    y += 20;
+    dashes(y);
+
+    // 總計：倍寬倍高的大字
+    const total = fmt(day.totalTokens);
+    const big = Math.min(2, (R_PRINT - 5 * R_CELL) / (colsOf(total) * R_CELL));
+    y += 58;
+    print('總計', 0, y, { bold: true });
+    print(total, R_PRINT, y, { align: 'right', bold: true, scale: big });
+    y += 30;
+    const [short, unit] = zhParts(day.totalTokens);
+    print(unit ? `約 ${short} ${unit} tokens` : 'tokens', R_PRINT, y, { align: 'right' });
+    y += 36;
+    row(y, 'API 等值', usd(day.totalCost));
+    if (data.electricity && day.energyKwh) {
+      y += 30;
+      row(y, '耗電約', kwhText(day.energyKwh.mid));
+      y += 30;
+      row(y, '電費約', billText(day.electricityCost.mid));
+    }
+    y += 20;
+    dashes(y);
+
+    // 跟前一天、前 N 天平均比，排名
+    y += 30;
+    row(y, isToday ? '比昨天全天' : '比前一天', delta(day.totalTokens, st.prev?.totalTokens) || '—');
+    y += 30;
+    row(y, `比前 ${st.avgDays} 天平均`, (st.avgDays && delta(day.totalTokens, st.avg)) || '—');
+    y += 30;
+    row(y, `最近 ${st.window} 天`, st.rank ? `第 ${st.rank} 高` : '—');
+    y += 20;
+    dashes(y);
+
+    // 到這天為止的 14 天：這天塗黑，其他天只描邊
+    const idx = data.days.findIndex((d) => d.date === day.date);
+    const span = data.days.slice(Math.max(0, idx - 13), idx + 1);
+    y += 30;
+    print(isToday ? `最近 ${span.length} 天` : `到 ${md(day.date)} 為止的 ${span.length} 天`, 0, y);
+    const chartH = 64, base = px(y + 18 + chartH);
+    const slot = R_PRINT / span.length, barW = Math.min(16, slot * 0.6);
+    const max = Math.max(1, ...span.map((d) => d.totalTokens));
+    span.forEach((d, k) => {
+      const h = d.totalTokens ? Math.max(2, (d.totalTokens / max) * chartH) : 0;
+      const x = px(L + k * slot + (slot - barW) / 2);
+      const sel = d.date === day.date;
+      draw(() => {
+        ctx.fillStyle = RC.ink;
+        if (sel) ctx.fillRect(x, base - h, barW, h);
+        else if (h) {
+          ctx.lineWidth = 1.5;
+          ctx.strokeStyle = RC.ink;
+          ctx.strokeRect(x + 0.75, base - h + 0.75, barW - 1.5, h - 0.75);
+        }
+      });
+    });
+    draw(() => { ctx.fillStyle = RC.ink; ctx.fillRect(L, base, R_PRINT, 1.5); });
+    y = base + 24;
+    if (span.length > 1) print(md(span[0].date), 0, y, { small: true });
+    print(isToday ? '今天' : md(day.date), R_PRINT, y, { align: 'right', small: true, bold: true });
+    y += 20;
+    dashes(y);
+
+    // 頁尾
+    y += 28;
+    print('數據來自 ccusage', R_PRINT / 2, y, { align: 'center', small: true });
+    y += 22;
+    print(REPO_URL.replace('https://', ''), R_PRINT / 2, y, { align: 'center', small: true });
+    y += 34;
+    print('蹬掉的 Token 恕不退還', R_PRINT / 2, y, { align: 'center' });
+    y += 30;
+    print('謝謝光臨', R_PRINT / 2, y, { align: 'center', bold: true });
+    const detailBottom = y + 30 + R_TOOTH;
+    const H = detailBottom + R_DESK;
+
+    // ===== 畫：桌面、兩張紙（上緣、下緣是撕下來的鋸齒），再印字 =====
+    ctx.fillStyle = RC.desk;
+    ctx.fillRect(0, 0, CARD_W, H);
+    const x0 = R_DESK, x1 = CARD_W - R_DESK;
+    const sheet = (top, bottom, toothTop, toothBottom) => {
+      ctx.beginPath();
+      if (toothTop) {
+        ctx.moveTo(x0, top + R_TOOTH / 2);
+        for (let x = x0; x < x1; x += R_TOOTH) {
+          ctx.lineTo(x + R_TOOTH / 2, top);
+          ctx.lineTo(x + R_TOOTH, top + R_TOOTH / 2);
+        }
+      } else {
+        ctx.moveTo(x0, top);
+        ctx.lineTo(x1, top);
+      }
+      if (toothBottom) {
+        ctx.lineTo(x1, bottom - R_TOOTH / 2);
+        for (let x = x1; x > x0; x -= R_TOOTH) {
+          ctx.lineTo(x - R_TOOTH / 2, bottom);
+          ctx.lineTo(x - R_TOOTH, bottom - R_TOOTH / 2);
+        }
+      } else {
+        ctx.lineTo(x1, bottom);
+        ctx.lineTo(x0, bottom);
+      }
+      ctx.closePath();
+      ctx.save();
+      ctx.shadowColor = RC.shadow;
+      ctx.shadowBlur = 12;
+      ctx.shadowOffsetY = 3;
+      ctx.fillStyle = RC.paper;
+      ctx.fill();
+      ctx.restore();
+    };
+    sheet(proofTop, proofBottom, true, false);
+    sheet(detailTop, detailBottom, false, true);
+    ops.forEach((f) => f());
+    return H;
+  }
+
+  // 發票用的字型（等寬數字、思源黑體）第一次產生圖片時才載，最多等 4 秒，不然 canvas 會先用系統字型畫
+  let receiptCss = null;
   async function loadCardFonts(chars) {
     if (!document.fonts?.load) return;
-    const wait = Promise.all([
-      document.fonts.load(`600 100px "Barlow Condensed"`, chars),
-      document.fonts.load('400 20px Huninn', chars),
-    ]).catch(() => {});
-    await Promise.race([wait, new Promise((r) => setTimeout(r, 3000))]);
+    if (!receiptCss) {
+      receiptCss = new Promise((resolve) => {
+        const link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = R_FONTS;
+        link.onload = link.onerror = resolve;
+        document.head.append(link);
+      });
+    }
+    const wait = receiptCss.then(() => Promise.all([
+      document.fonts.load(`500 20px "IBM Plex Mono"`, chars),
+      document.fonts.load(`700 20px "IBM Plex Mono"`, chars),
+      document.fonts.load('400 20px "Noto Sans TC"', chars),
+      document.fonts.load('700 20px "Noto Sans TC"', chars),
+      document.fonts.load('900 40px "Noto Sans TC"', chars),
+    ])).catch(() => {});
+    await Promise.race([wait, new Promise((r) => setTimeout(r, 4000))]);
   }
 
   async function reportImage(day) {
@@ -583,7 +965,7 @@
     const texts = [];
     drawReport(scratch, day, texts);
     await loadCardFonts([...new Set(texts.join(''))].join(''));
-    const h = Math.ceil(drawReport(scratch, day)); // 字型換了，高度重算一次
+    const h = Math.ceil(drawReport(scratch, day));
     const canvas = document.createElement('canvas');
     canvas.width = CARD_W * CARD_SCALE;
     canvas.height = h * CARD_SCALE;
