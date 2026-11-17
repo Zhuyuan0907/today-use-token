@@ -1,0 +1,6 @@
+node_modules/
+# install.sh 在沒有合適 Node 時下載的 Node、背景執行時的 log 與 pid
+.node/
+server.log
+.server.pid
+.DS_Store

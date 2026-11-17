@@ -1,0 +1,21 @@
+{
+  "name": "today-use-token",
+  "version": "1.0.0",
+  "private": true,
+  "description": "今天蹬了多少 Token：Claude Code 與 Codex 每天的 token 用量、花費與電費估算（數據來自 ccusage）",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Zhuyuan0907/today-use-token.git"
+  },
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ccusage": "^20.0.48"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
