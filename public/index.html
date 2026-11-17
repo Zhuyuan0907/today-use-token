@@ -393,9 +393,11 @@
   // 仿 58mm 熱感紙：列印寬度 384 點，一般字一格 12×24 點、中文佔兩格，一行 32 格。
   // 熱感紙印不出彩色，所以整張只有黑色；圖片固定用淺色，貼到哪裡都好讀
   const RC = { desk: '#e3e6eb', paper: '#fdfdfb', ink: '#1b1b1b', shadow: 'rgb(20 26 36 / 0.18)' };
-  const R_MONO = '"IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace';
+  // 字照真的發票：中文是細的黑體，數字和英文是瘦長的窄字型，只有店名是粗體
   const R_HAN = '"Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif';
-  const R_FONTS = 'https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;700&family=Noto+Sans+TC:wght@400;700;900&display=swap';
+  const R_NUM = '"Roboto Condensed", "Arial Narrow", sans-serif';
+  const R_FONTS = 'https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;700&family=Roboto+Condensed:wght@400&display=swap';
+  const R_WEIGHT = { text: 400, head: 300 }; // 內文、證明聯上面的大字
   const R_CELL = 12, R_PRINT = 32 * R_CELL; // 一格 12 點，32 格 = 384 點
   const R_SIDE = 28, R_DESK = 24, R_TOOTH = 10; // 紙的左右留白、紙外的桌面、鋸齒
   const CARD_W = R_PRINT + 2 * (R_SIDE + R_DESK); // 邏輯寬度 488；輸出 2 倍
@@ -704,14 +706,24 @@
             ctx.fill();
           });
         } else if (ch !== ' ') {
-          const size = (o.small ? 15 : 20) * s * (han ? 1.15 : 1); // 中文跟熱感印表機一樣幾乎塞滿兩格
-          const font = han ? `${o.bold ? 700 : 400} ${size}px ${R_HAN}` : `${o.bold ? 700 : 500} ${size}px ${R_MONO}`;
+          // 中文幾乎塞滿兩格；數字、英文用窄字型，放大到跟中文差不多高，太寬的字（m、w）壓窄塞進一格
+          const size = (o.small ? 15 : 20) * s * (han ? 1.15 : 1.2);
+          const font = `${R_WEIGHT.text} ${size}px ${han ? R_HAN : R_NUM}`;
           draw(() => {
             ctx.font = font;
             ctx.fillStyle = RC.ink;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'alphabetic';
-            ctx.fillText(ch, mid, y);
+            const adv = ctx.measureText(ch).width, room = cw - 0.5;
+            if (adv <= room) {
+              ctx.fillText(ch, mid, y);
+            } else {
+              ctx.save();
+              ctx.translate(mid, y);
+              ctx.scale(room / adv, 1);
+              ctx.fillText(ch, 0, 0);
+              ctx.restore();
+            }
           });
         }
         cx += cw;
@@ -724,39 +736,62 @@
       if (right) print(right, R_PRINT, y, { ...o, align: 'right' });
     };
     const dashes = (y) => print('-'.repeat(32), 0, y);
-    // 證明聯上面的大字：置中，太寬就壓窄
-    const headline = (str, y, font, maxW = R_PRINT) => {
+    // 證明聯上面的大字：置中，中文細黑體，數字和英文用窄字型、跟中文一樣高。
+    // 數字、英文、「-」跟真的發票一樣每個佔一樣寬（至少一個數字寬），字距鬆一點。從目前的 y 往下排一行
+    const headChars = (str) => [...str].map((ch) => ({ ch, han: isWide(ch) }));
+    const headFont = (c, size) => `${R_WEIGHT.head} ${c.han ? size : size * 1.2}px ${c.han ? R_HAN : R_NUM}`;
+    const headCells = (chars, size) => chars.map((c) => {
+      ctx.font = headFont(c, size);
+      const adv = ctx.measureText(c.ch).width;
+      return c.han ? adv : Math.max(adv, ctx.measureText('0').width) + size * 0.07;
+    });
+    const sizeFor = (str, width) => {
+      const w = headCells(headChars(str), 100).reduce((a, b) => a + b, 0);
+      return (100 * width) / (w || 1); // 寬度剛好是 width 的字級
+    };
+    const headline = (str, size) => {
       texts.push(str);
+      const chars = headChars(str);
+      y += size * 1.02;
+      const base = y;
       draw(() => {
-        ctx.font = font;
+        const cells = headCells(chars, size);
+        let x = L + (R_PRINT - cells.reduce((a, b) => a + b, 0)) / 2;
         ctx.fillStyle = RC.ink;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'alphabetic';
-        const w = ctx.measureText(str).width;
-        ctx.save();
-        ctx.translate(L + R_PRINT / 2, y);
-        if (w > maxW) ctx.scale(maxW / w, 1);
-        ctx.fillText(str, 0, 0);
-        ctx.restore();
+        chars.forEach((c, i) => {
+          ctx.font = headFont(c, size);
+          ctx.fillText(c.ch, x + cells[i] / 2, base);
+          x += cells[i];
+        });
       });
     };
 
     // ===== 第一張：電子發票證明聯 =====
     const proofTop = R_DESK;
     let y = proofTop + R_TOOTH + 40;
-    headline('今天蹬了多少 Token', y, `700 24px ${R_HAN}`);
-    y += 50;
-    headline('電子蹬票證明聯', y, `900 38px ${R_HAN}`, 300);
-    y += 54;
-    headline(period.text, y, `900 44px ${R_HAN}`, 330);
-    y += 52;
-    headline(`${track.slice(0, 2)}-${track.slice(2)}`, y, `900 44px ${R_HAN}`, 330);
-    y += 38;
+    // 店名當作店家標誌，粗體
+    texts.push('今天蹬了多少 Token');
+    draw(() => {
+      ctx.font = `700 24px ${R_HAN}`;
+      ctx.fillStyle = RC.ink;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'alphabetic';
+      ctx.fillText('今天蹬了多少 Token', L + R_PRINT / 2, proofTop + R_TOOTH + 40);
+    });
+    y += 8;
+    const number = `${track.slice(0, 2)}-${track.slice(2)}`;
+    const headSize = sizeFor(number, 336); // 期別和號碼一樣大，跟真的發票一樣
+    headline('電子蹬票證明聯', sizeFor('電子蹬票證明聯', 340));
+    headline(period.text, headSize);
+    headline(number, headSize);
+    y += 32;
     row(y, issuedAt(day));
     y += 30;
-    row(y, `隨機碼 ${rand}`, `總計 ${usd(day.totalCost)}`);
+    row(y, `隨機碼:${rand}`, `總計:${usd(day.totalCost)}`);
     y += 30;
-    row(y, `賣方 ${clip(parts.map((a) => a.name).join('、') || '—', 27)}`);
+    row(y, `賣方:${clip(parts.map((a) => a.name).join('、') || '—', 27)}`);
 
     // 條碼（期別＋字軌號碼＋隨機碼，共 19 碼），置中
     y += 16;
@@ -787,7 +822,7 @@
     // ===== 第二張：交易明細 =====
     const detailTop = proofBottom + 14;
     y = detailTop + 40;
-    print('交易明細', R_PRINT / 2, y, { align: 'center', bold: true });
+    print('交易明細', R_PRINT / 2, y, { align: 'center' });
     y += 34;
     const until = isToday ? `到 ${issuedAt(day).slice(11, 16)} 為止` : '全天';
     row(y, `${day.date} ${weekday(day.date)}`, until);
@@ -806,8 +841,8 @@
       const s = day.agents[a.key];
       y += 34;
       const title = a.key === 'other' && s.sources.length ? `${a.name}（${s.sources.join('、')}）` : a.name;
-      print(clip(title, 26), 0, y, { bold: true });
-      print(pct(s.totalTokens, day.totalTokens), R_PRINT, y, { align: 'right', bold: true });
+      print(clip(title, 26), 0, y);
+      print(pct(s.totalTokens, day.totalTokens), R_PRINT, y, { align: 'right' });
       const shown = s.models.slice(0, 3);
       const rest = s.models.slice(3);
       const lines = shown.map((m) => [prettyModel(m.name).replace(/^Claude /, ''), m.tokens, m.cost]);
@@ -829,8 +864,8 @@
     const total = fmt(day.totalTokens);
     const big = Math.min(2, (R_PRINT - 5 * R_CELL) / (colsOf(total) * R_CELL));
     y += 58;
-    print('總計', 0, y, { bold: true });
-    print(total, R_PRINT, y, { align: 'right', bold: true, scale: big });
+    print('總計', 0, y);
+    print(total, R_PRINT, y, { align: 'right', scale: big });
     y += 30;
     const [short, unit] = zhParts(day.totalTokens);
     print(unit ? `約 ${short} ${unit} tokens` : 'tokens', R_PRINT, y, { align: 'right' });
@@ -880,7 +915,7 @@
     draw(() => { ctx.fillStyle = RC.ink; ctx.fillRect(L, base, R_PRINT, 1.5); });
     y = base + 24;
     if (span.length > 1) print(md(span[0].date), 0, y, { small: true });
-    print(isToday ? '今天' : md(day.date), R_PRINT, y, { align: 'right', small: true, bold: true });
+    print(isToday ? '今天' : md(day.date), R_PRINT, y, { align: 'right', small: true });
     y += 20;
     dashes(y);
 
@@ -892,7 +927,7 @@
     y += 34;
     print('蹬掉的 Token 恕不退還', R_PRINT / 2, y, { align: 'center' });
     y += 30;
-    print('謝謝光臨', R_PRINT / 2, y, { align: 'center', bold: true });
+    print('謝謝光臨', R_PRINT / 2, y, { align: 'center' });
     const detailBottom = y + 30 + R_TOOTH;
     const H = detailBottom + R_DESK;
 
@@ -937,7 +972,7 @@
     return H;
   }
 
-  // 發票用的字型（等寬數字、思源黑體）第一次產生圖片時才載，最多等 4 秒，不然 canvas 會先用系統字型畫
+  // 發票用的字型（思源黑體、窄的 Roboto Condensed）第一次產生圖片時才載，最多等 4 秒，不然 canvas 會先用系統字型畫
   let receiptCss = null;
   async function loadCardFonts(chars) {
     if (!document.fonts?.load) return;
@@ -951,11 +986,10 @@
       });
     }
     const wait = receiptCss.then(() => Promise.all([
-      document.fonts.load(`500 20px "IBM Plex Mono"`, chars),
-      document.fonts.load(`700 20px "IBM Plex Mono"`, chars),
+      document.fonts.load('400 24px "Roboto Condensed"', chars),
+      document.fonts.load('300 40px "Noto Sans TC"', chars),
       document.fonts.load('400 20px "Noto Sans TC"', chars),
-      document.fonts.load('700 20px "Noto Sans TC"', chars),
-      document.fonts.load('900 40px "Noto Sans TC"', chars),
+      document.fonts.load('700 24px "Noto Sans TC"', chars),
     ])).catch(() => {});
     await Promise.race([wait, new Promise((r) => setTimeout(r, 4000))]);
   }
