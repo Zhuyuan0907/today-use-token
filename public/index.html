@@ -74,6 +74,27 @@
   .btn:focus-visible { outline: 2px solid var(--codex); outline-offset: 2px; }
   .day:focus-visible { outline: 2px solid var(--codex); outline-offset: -2px; }
   .btn[hidden] { display: none; }
+  .btn.primary { background: var(--ink); border-color: var(--ink); color: var(--surface); }
+  .btn.primary:hover { opacity: 0.88; }
+  a.btn { text-decoration: none; display: inline-block; }
+
+  /* ---------- 日報圖片 ---------- */
+  .report {
+    border: 0; padding: 0; border-radius: 1rem; background: var(--surface); color: var(--ink);
+    width: min(34rem, calc(100vw - 2rem)); max-height: calc(100dvh - 2rem);
+    box-shadow: 0 1.2rem 4rem rgb(0 0 0 / 0.3);
+  }
+  .report::backdrop { background: rgb(10 12 16 / 0.55); }
+  .report-in { padding: 1rem 1.1rem 1.1rem; display: grid; gap: 0.8rem; }
+  .report-foot { display: flex; align-items: center; justify-content: flex-end; gap: 0.6rem 1rem; flex-wrap: wrap; }
+  .report-head { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
+  .report-head h2 { margin: 0; font-size: 1.05rem; font-weight: 400; }
+  .report img {
+    display: block; margin: 0 auto; max-width: 100%; max-height: calc(100dvh - 12.5rem); width: auto; height: auto;
+    border-radius: 0.6rem; border: 1px solid var(--line); background: #fff;
+  }
+  .report-note { margin: 0; flex: 1 1 12rem; font-size: 0.9rem; color: var(--ink-2); }
+  .report-actions { display: flex; gap: 0.6rem; }
 
   /* ---------- 現在有沒有在蹬 ---------- */
   .status { font-size: 0.9rem; color: var(--muted); white-space: nowrap; }
@@ -184,7 +205,7 @@
     <div class="top-right">
       <span class="status" id="status" hidden></span>
       <span class="updated" id="updated">讀取中…</span>
-      <button type="button" class="btn" id="copy" hidden title="把這天的日報複製成文字，可以直接貼到聊天室">複製日報</button>
+      <button type="button" class="btn" id="copy" hidden title="把這天的日報做成一張圖，可以複製或下載">日報圖片</button>
     </div>
   </header>
 
@@ -202,6 +223,23 @@
 
   <main class="panels" id="panels"></main>
 </div>
+
+<dialog class="report" id="report" aria-labelledby="report-title">
+  <div class="report-in">
+    <div class="report-head">
+      <h2 id="report-title">日報</h2>
+      <button type="button" class="btn" id="report-close">關閉</button>
+    </div>
+    <img id="report-img" alt="">
+    <div class="report-foot">
+      <p class="report-note" id="report-note"></p>
+      <div class="report-actions">
+        <button type="button" class="btn primary" id="report-copy">複製圖片</button>
+        <a class="btn" id="report-download" href="#" download>下載圖片</a>
+      </div>
+    </div>
+  </div>
+</dialog>
 
 <script>
 (() => {
@@ -346,38 +384,260 @@
     return lead + items.map(([k, v]) => `${k} <b>${v}</b>`).join('<span class="sep">·</span>');
   }
 
-  // 純文字版日報，給「複製日報」用
-  function reportText(day) {
+  // ---------- 日報圖片：用 canvas 畫一張卡片 ----------
+  // 圖片固定用淺色，貼到哪裡都好讀；顏色跟網頁的淺色主題一致
+  const CARD = {
+    bg: '#ffffff', tile: '#f2f3f6', track: '#eceef1', line: '#e3e6ea',
+    ink: '#15171c', ink2: '#4b505a', muted: '#767b85',
+    claude: '#eb6834', codex: '#2a78d6', other: '#1baf7a',
+  };
+  const CARD_TEXT = 'Huninn, "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif';
+  const CARD_NUM = '"Barlow Condensed", Huninn, sans-serif';
+  const CARD_W = 600; // 邏輯寬度；輸出 2 倍 = 1200px
+  const CARD_SCALE = 2;
+
+  // 畫整張卡片，回傳高度。texts 會收集畫過的字，用來先把字型載好
+  function drawReport(ctx, day, texts = []) {
+    const W = CARD_W, P = 36, inner = W - 2 * P;
+    const text = (str, x, y, o = {}) => {
+      str = String(str);
+      texts.push(str);
+      let size = o.size || 16;
+      const font = (sz) => `${o.num ? 600 : 400} ${sz}px ${o.num ? CARD_NUM : CARD_TEXT}`;
+      ctx.font = font(size);
+      if (o.max && ctx.measureText(str).width > o.max) {
+        size = (size * o.max) / ctx.measureText(str).width;
+        ctx.font = font(size);
+      }
+      ctx.fillStyle = o.color || CARD.ink;
+      ctx.textAlign = o.align || 'left';
+      ctx.textBaseline = 'alphabetic';
+      ctx.fillText(str, x, y);
+      return ctx.measureText(str).width;
+    };
+    const box = (x, y, w, h, r, color) => {
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.roundRect(x, y, w, h, r);
+      ctx.fill();
+    };
+    const hline = (y) => { ctx.fillStyle = CARD.line; ctx.fillRect(P, y, inner, 1); };
+    const dot = (x, y, color) => { ctx.fillStyle = color; ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill(); };
+    // ▲▼ 字型裡的太大太粗，自己畫一個小的；y 是文字基線
+    const arrow = (x, y, up) => {
+      ctx.fillStyle = CARD.ink;
+      ctx.beginPath();
+      if (up) { ctx.moveTo(x, y - 2); ctx.lineTo(x + 12, y - 2); ctx.lineTo(x + 6, y - 13); }
+      else { ctx.moveTo(x, y - 13); ctx.lineTo(x + 12, y - 13); ctx.lineTo(x + 6, y - 2); }
+      ctx.closePath();
+      ctx.fill();
+    };
+
+    const isToday = day.date === data.today;
+    const st = stats(day);
+    const parts = usedAgents(day).map((a) => ({ ...a, color: CARD[a.key], v: day.agents[a.key].totalTokens }));
+
+    ctx.fillStyle = CARD.bg;
+    ctx.fillRect(0, 0, W, 5000);
+
+    // 頁首：標題、日期
+    let y = P + 12;
+    text('今天蹬了多少 Token · 日報', P, y, { size: 14, color: CARD.muted });
+    if (isToday) {
+      const t = new Date(data.generatedAt).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false });
+      text(`今天到 ${t} 為止`, W - P, y, { size: 14, color: CARD.muted, align: 'right' });
+    }
+    const [yy, mm, dd] = day.date.split('-');
+    y += 38;
+    text(`${yy} 年 ${+mm} 月 ${+dd} 日 ${weekday(day.date)}`, P, y, { size: 26 });
+
+    // 總量：撐滿寬度，最多 120px
+    const big = fmt(day.totalTokens);
+    ctx.font = `600 100px ${CARD_NUM}`;
+    const size = Math.min(120, (100 * inner) / (ctx.measureText(big).width || 1));
+    y += 24 + size * 0.72;
+    text(big, P, y, { size, num: true });
+    y += 40;
+    const [short, unit] = zhParts(day.totalTokens);
+    text(unit ? `約 ${short} ${unit} tokens` : `${short} tokens`, P, y, { size: 18, color: CARD.ink2 });
+
+    // 各工具比例：細條 + 圖例
+    y += 22;
+    if (parts.length) {
+      const gap = 2, avail = inner - gap * (parts.length - 1);
+      let x = P;
+      for (const p of parts) {
+        const w = Math.max(2, (p.v / day.totalTokens) * avail);
+        box(x, y, w, 10, 5, p.color);
+        x += w + gap;
+      }
+    } else {
+      box(P, y, inner, 10, 5, CARD.track);
+    }
+    y += 34;
+    if (!parts.length) text('這天沒有用量', P, y, { size: 14, color: CARD.muted });
+    let lx = P;
+    for (const p of parts) {
+      dot(lx + 5, y - 5, p.color);
+      lx += 16 + text(`${p.name} ${pct(p.v, day.totalTokens)}`, lx + 16, y, { size: 14, color: CARD.ink2 }) + 22;
+    }
+
+    // 六格：花費、耗電、電費／跟前一天、前 N 天平均比、排名
+    y += 22;
+    const gapT = 10, tw = (inner - 2 * gapT) / 3, th = 72;
     const e = data.electricity;
-    const lines = [`${md(day.date)} ${weekday(day.date)} Token 日報${day.date === data.today ? '（到目前為止）' : ''}`];
-    lines.push(`總計 ${fmt(day.totalTokens)} tokens（約 ${zh(day.totalTokens)}）`);
-    const money = [`API 等值 ${usd(day.totalCost)}`];
-    if (e && day.energyKwh) {
-      money.push(`耗電約 ${fmt(day.energyKwh.mid, 1)} 度`, `電費約 ${e.currency}${fmt(day.electricityCost.mid, 0)}`);
+    const kwh = day.energyKwh?.mid ?? 0, money = day.electricityCost?.mid ?? 0;
+    const tiles = [
+      ['API 等值', usd(day.totalCost), true],
+      ['耗電約', `${fmt(kwh, kwh < 1 ? 2 : kwh < 100 ? 1 : 0)} 度`, true],
+      ['電費約', `${e?.currency ?? ''}${fmt(money, money < 10 ? 1 : 0)}`, true],
+      [isToday ? '比昨天全天' : '比前一天', delta(day.totalTokens, st.prev?.totalTokens) || '—', false],
+      [`比前 ${st.avgDays} 天平均`, (st.avgDays && delta(day.totalTokens, st.avg)) || '—', false],
+      [`最近 ${st.window} 天排名`, st.rank ? `第 ${st.rank} 高` : '—', false],
+    ];
+    tiles.forEach(([label, value, num], i) => {
+      const x = P + (i % 3) * (tw + gapT), ty = y + Math.floor(i / 3) * (th + gapT);
+      box(x, ty, tw, th, 12, CARD.tile);
+      text(label, x + 14, ty + 25, { size: 13, color: CARD.muted, max: tw - 28 });
+      const m = /^([▲▼]) (.+)$/.exec(value);
+      if (m) {
+        arrow(x + 14, ty + 57, m[1] === '▲');
+        text(m[2], x + 33, ty + 57, { size: 20, max: tw - 47 });
+      } else {
+        text(value, x + 14, ty + 57, num ? { size: 30, num: true, max: tw - 28 } : { size: 20, max: tw - 28 });
+      }
+    });
+    y += th * 2 + gapT;
+
+    // 這天以前的 14 天：這天是最後一根，其他淡一點
+    const idx = data.days.findIndex((d) => d.date === day.date);
+    const span = data.days.slice(Math.max(0, idx - 13), idx + 1);
+    y += 40;
+    text(isToday ? `最近 ${span.length} 天` : `到 ${md(day.date)} 為止的 ${span.length} 天`, P, y, { size: 15, color: CARD.ink2 });
+    text(`${isToday ? '今天' : md(day.date)} ${day.totalTokens ? zh(day.totalTokens) : '0'}`, W - P, y, { size: 15, align: 'right' });
+    const chartH = 100, base = y + 30 + chartH;
+    const slot = inner / span.length, bw = Math.min(26, slot * 0.64);
+    const max = Math.max(1, ...span.map((d) => d.totalTokens));
+    const cx = (k) => P + k * slot + slot / 2;
+    hline(base);
+    span.forEach((d, k) => {
+      const x = cx(k) - bw / 2;
+      const sel = d.date === day.date;
+      const segs = AGENTS.map((a) => ({ c: CARD[a.key], v: d.agents[a.key].totalTokens })).filter((q) => q.v > 0);
+      let top = base;
+      ctx.globalAlpha = sel ? 1 : 0.35;
+      segs.forEach((q, j) => {
+        const h = Math.max(1.5, (q.v / max) * chartH);
+        ctx.fillStyle = q.c;
+        ctx.beginPath();
+        ctx.roundRect(x, top - h, bw, h, j === segs.length - 1 ? [3, 3, 0, 0] : 0);
+        ctx.fill();
+        top -= h + 2; // 堆疊之間留 2px
+      });
+      ctx.globalAlpha = 1;
+    });
+    const last = span.length - 1;
+    text(isToday ? '今天' : md(day.date), cx(last), base + 20, { size: 12, color: CARD.ink, align: 'center' });
+    if (last >= 4) text(md(span[0].date), cx(0), base + 20, { size: 12, color: CARD.muted, align: 'center' });
+    y = base + 20;
+
+    // 各工具：總量、花費、前三個模型
+    for (const p of parts) {
+      const a = day.agents[p.key];
+      y += 44;
+      hline(y - 28);
+      dot(P + 5, y - 6, p.color);
+      const title = p.key === 'other' && a.sources.length ? `${p.name}（${a.sources.join('、')}）` : p.name;
+      text(title, P + 18, y, { size: 18, max: 230 });
+      text(`${zh(a.totalTokens)} tokens · ${usd(a.totalCost)}`, W - P, y, { size: 15, color: CARD.ink2, align: 'right' });
+      const bx = P + 190, bwid = inner - 190 - 124;
+      for (const m of a.models.slice(0, 3)) {
+        y += 28;
+        text(prettyModel(m.name), P + 18, y, { size: 14, color: CARD.ink2, max: 160 });
+        box(bx, y - 8, bwid, 6, 3, CARD.track);
+        box(bx, y - 8, Math.max(3, (bwid * m.tokens) / (a.totalTokens || 1)), 6, 3, p.color);
+        text(zh(m.tokens), W - P - 54, y, { size: 14, align: 'right' });
+        text(pct(m.tokens, a.totalTokens), W - P, y, { size: 13, color: CARD.muted, align: 'right' });
+      }
     }
-    lines.push(money.join(' · '));
-    const cmp = compareItems(day).map(([k, v]) => `${k} ${v}`).join(' · ');
-    if (cmp) lines.push(cmp);
-    for (const a of usedAgents(day)) {
-      const s = day.agents[a.key];
-      lines.push('', `${a.name}　${zh(s.totalTokens)} tokens · ${usd(s.totalCost)}`);
-      for (const m of s.models.slice(0, 5)) lines.push(`  ${prettyModel(m.name)}　${zh(m.tokens)}（${pct(m.tokens, s.totalTokens)}）`);
-    }
-    return lines.join('\n');
+
+    // 頁尾
+    y += 46;
+    hline(y - 24);
+    text('數據來自 ccusage · github.com/Zhuyuan0907/today-use-token', P, y, { size: 12, color: CARD.muted });
+    return y + P - 14;
   }
 
-  async function copyText(text) {
-    // 用區網 IP 開（http://192.168…）時不是安全連線，navigator.clipboard 不能用，改用舊方法
-    if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.setAttribute('readonly', '');
-    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
-    document.body.appendChild(ta);
-    ta.select();
-    const ok = document.execCommand('copy');
-    ta.remove();
-    if (!ok) throw new Error('copy failed');
+  // 等字型載好（最多 3 秒），不然 canvas 會先用系統字型畫
+  async function loadCardFonts(chars) {
+    if (!document.fonts?.load) return;
+    const wait = Promise.all([
+      document.fonts.load(`600 100px "Barlow Condensed"`, chars),
+      document.fonts.load('400 20px Huninn', chars),
+    ]).catch(() => {});
+    await Promise.race([wait, new Promise((r) => setTimeout(r, 3000))]);
+  }
+
+  async function reportImage(day) {
+    const scratch = document.createElement('canvas').getContext('2d');
+    const texts = [];
+    drawReport(scratch, day, texts);
+    await loadCardFonts([...new Set(texts.join(''))].join(''));
+    const h = Math.ceil(drawReport(scratch, day)); // 字型換了，高度重算一次
+    const canvas = document.createElement('canvas');
+    canvas.width = CARD_W * CARD_SCALE;
+    canvas.height = h * CARD_SCALE;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(CARD_SCALE, CARD_SCALE);
+    drawReport(ctx, day);
+    return new Promise((resolve, reject) => {
+      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('產生圖片失敗'))), 'image/png');
+    });
+  }
+
+  // 瀏覽器只在 https 或 localhost 讓網頁直接把圖片放進剪貼簿；用區網 IP 開時改成右鍵／長按複製
+  const canCopyImage = () => window.isSecureContext && !!navigator.clipboard?.write && typeof ClipboardItem !== 'undefined';
+  const copyImage = (blobOrPromise) => navigator.clipboard.write([new ClipboardItem({ 'image/png': blobOrPromise })]);
+
+  let reportBlob = null;
+  let reportUrl = null;
+
+  async function openReport() {
+    if (!data) return;
+    const day = currentDay();
+    const btn = $('#copy');
+    const blobP = reportImage(day);
+    let copied = false;
+    if (canCopyImage()) {
+      // Safari 要在點擊當下就呼叫 clipboard.write，所以先丟 Promise 進去
+      try { await copyImage(blobP); copied = true; } catch { /* 沒有權限之類的，下面讓人自己按 */ }
+    }
+    try {
+      reportBlob = await blobP;
+    } catch {
+      btn.textContent = '產生失敗';
+      setTimeout(() => { btn.textContent = '日報圖片'; }, 1800);
+      return;
+    }
+    if (reportUrl) URL.revokeObjectURL(reportUrl);
+    reportUrl = URL.createObjectURL(reportBlob);
+    const name = `${md(day.date)} ${weekday(day.date)} 日報`;
+    $('#report-title').textContent = name;
+    const img = $('#report-img');
+    img.src = reportUrl;
+    img.alt = `${name}：${fmt(day.totalTokens)} tokens，API 等值 ${usd(day.totalCost)}`;
+    const dl = $('#report-download');
+    dl.href = reportUrl;
+    dl.download = `token-report-${day.date}.png`;
+    $('#report-copy').hidden = !canCopyImage() || copied;
+    $('#report-note').textContent = copied
+      ? '✓ 已複製，直接貼到聊天室就好'
+      : canCopyImage()
+        ? '可以複製或下載'
+        : matchMedia('(pointer: coarse)').matches
+          ? '長按圖片 →「拷貝」或「儲存圖片」'
+          : '在圖片上按右鍵 →「複製圖片」';
+    $('#report').showModal();
   }
 
   // ---------- 各工具面板 ----------
@@ -596,24 +856,25 @@
   });
   $('#back').addEventListener('click', () => select(null));
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && selected) select(null);
+    if (e.key === 'Escape' && selected && !$('#report').open) select(null);
   });
   window.addEventListener('hashchange', () => select(hashDate()));
   selected = hashDate();
 
-  let copyTimer;
-  $('#copy').addEventListener('click', async () => {
-    if (!data) return;
-    const btn = $('#copy');
+  $('#copy').addEventListener('click', openReport);
+  $('#report-copy').addEventListener('click', async () => {
+    if (!reportBlob) return;
     try {
-      await copyText(reportText(currentDay()));
-      btn.textContent = '已複製 ✓';
+      await copyImage(reportBlob);
+      $('#report-note').textContent = '✓ 已複製，直接貼到聊天室就好';
+      $('#report-copy').hidden = true;
     } catch {
-      btn.textContent = '複製失敗';
+      $('#report-note').textContent = '複製失敗：在圖片上按右鍵 →「複製圖片」，或下載';
     }
-    clearTimeout(copyTimer);
-    copyTimer = setTimeout(() => { btn.textContent = '複製日報'; }, 1800);
   });
+  $('#report-close').addEventListener('click', () => $('#report').close());
+  // 點對話框外面的暗色區域也關掉
+  $('#report').addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.close(); });
 
   let resizeTimer;
   window.addEventListener('resize', () => {
